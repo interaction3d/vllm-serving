@@ -1,0 +1,29 @@
+# VCS
+.git
+.gitignore
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.so
+*.egg-info/
+.venv/
+venv/
+
+# Env
+.env
+.env.*
+
+# Caches
+.cache/
+.huggingface/
+HF_HOME/
+
+# Build artifacts
+build/
+dist/
+
+# Misc
+.DS_Store 

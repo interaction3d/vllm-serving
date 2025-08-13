@@ -17,7 +17,8 @@ TP_DEGREE = int(os.getenv("TP_DEGREE", "1"))
 MAX_MODEL_LEN = int(os.getenv("MAX_MODEL_LEN", "8192"))
 TRUST_REMOTE_CODE = os.getenv("TRUST_REMOTE_CODE", "false").lower() in {"1", "true", "yes"}
 
-
+# bug when loading model from huggingface
+# https://github.com/vllm-project/vllm/issues/22383
 class GenerateRequest(BaseModel):
     prompt: str = Field(..., description="Input prompt text")
     temperature: float = 0.7

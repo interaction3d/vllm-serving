@@ -1,0 +1,14 @@
+gcloud run deploy vllm-serving \
+  --image=us-central1-docker.pkg.dev/image-classification-terraform/vllm/vllm-gpt-oss-20b-v3:latest \
+  --region=us-central1 \
+  --platform=managed \
+  --gpu=1 \
+  --gpu-type=nvidia-l4 \
+  --memory=32Gi \
+  --cpu=8 \
+  --concurrency=1 \
+  --timeout=3600 \
+  --port=8080 \
+  --set-env-vars=MODEL_NAME=openai/gpt-oss-20b,TP_DEGREE=1,MAX_MODEL_LEN=8192,TRUST_REMOTE_CODE=false,VLLM_DEVICE=cuda,HUGGING_FACE_HUB_TOKEN=<YOUR_TOKEN> \
+  --max-instances=1 \
+  --allow-unauthenticated

@@ -37,5 +37,8 @@ EXPOSE 8080
 HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
     CMD curl -f http://localhost:${PORT}/health || exit 1
 
+# Override the base image's entrypoint to run our FastAPI app
+ENTRYPOINT []
+
 # Run the FastAPI app via uvicorn (Cloud Run uses $PORT)
-CMD ["sh", "-c", "uvicorn main:app --host 0.0.0.0 --port ${PORT:-8080}"] 
+CMD ["python3", "-m", "uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8080"] 

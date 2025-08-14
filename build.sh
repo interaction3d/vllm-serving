@@ -2,7 +2,7 @@ PROJECT_ID="image-classification-terraform"
 REGION="us-central1"
 REPO="vllm"
 IMAGE_NAME="vllm-gpt-oss-20b-v3"
-IMAGE_TAG="latest"
+IMAGE_TAG="chattemplate"
 
 # gcloud services enable artifactregistry.googleapis.com cloudbuild.googleapis.com --project "$PROJECT_ID"
 

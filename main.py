@@ -5,6 +5,7 @@ from typing import List, Optional
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field
+from transformers import AutoTokenizer
 
 from vllm import LLM, SamplingParams
 
@@ -60,6 +61,7 @@ app = FastAPI(title="vLLM FastAPI Server", version="0.1.0")
 
 
 _llm: Optional[LLM] = None
+_tokenizer: Optional[AutoTokenizer] = None
 
 
 async def get_llm() -> LLM:
@@ -76,6 +78,19 @@ async def get_llm() -> LLM:
         loop = asyncio.get_running_loop()
         _llm = await loop.run_in_executor(None, _init_llm)
     return _llm
+
+
+async def get_tokenizer() -> AutoTokenizer:
+    print("Getting tokenizer...")
+    global _tokenizer
+    if _tokenizer is None:
+        def _init_tokenizer() -> AutoTokenizer:
+            kwargs = dict(trust_remote_code=TRUST_REMOTE_CODE)
+            return AutoTokenizer.from_pretrained(MODEL_NAME, **kwargs)
+
+        loop = asyncio.get_running_loop()
+        _tokenizer = await loop.run_in_executor(None, _init_tokenizer)
+    return _tokenizer
 
 
 @app.get("/health")
@@ -110,21 +125,17 @@ async def generate(req: GenerateRequest):
 @app.post("/chat", response_model=ChatResponse)
 async def chat(req: ChatRequest):
     try:
-        def to_chatml(messages: List[ChatMessage]) -> str:
-            chunks = []
-            for m in messages:
-                if m.role == "system":
-                    chunks.append(f"<|im_start|>system\n{m.content}<|im_end|>")
-                elif m.role == "user":
-                    chunks.append(f"<|im_start|>user\n{m.content}<|im_end|>")
-                elif m.role == "assistant":
-                    chunks.append(f"<|im_start|>assistant\n{m.content}<|im_end|>")
-                else:
-                    chunks.append(f"<|im_start|>{m.role}\n{m.content}<|im_end|>")
-            chunks.append("<|im_start|>assistant\n")
-            return "\n".join(chunks)
-
-        prompt = to_chatml(req.messages)
+        # Convert messages to the format expected by apply_chat_template
+        messages = [{"role": m.role, "content": m.content} for m in req.messages]
+        
+        # Use the model's built-in chat template
+        tokenizer = await get_tokenizer()
+        prompt = tokenizer.apply_chat_template(
+            messages, 
+            tokenize=False, 
+            add_generation_prompt=True
+        )
+        
         sampling = SamplingParams(
             temperature=req.temperature,
             max_tokens=req.max_tokens,
@@ -132,9 +143,7 @@ async def chat(req: ChatRequest):
             top_k=req.top_k,
             presence_penalty=req.presence_penalty,
             frequency_penalty=req.frequency_penalty,
-            stop=(req.stop or []) + ["<|im_end|>"]
-            if "<|im_end|>" not in (req.stop or [])
-            else req.stop,
+            stop=req.stop,
         )
         model = await get_llm()
         outputs = await asyncio.get_running_loop().run_in_executor(

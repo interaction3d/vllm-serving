@@ -1,5 +1,6 @@
 import os
 import asyncio
+import time
 from typing import List, Optional
 
 from dotenv import load_dotenv
@@ -9,7 +10,36 @@ from transformers import AutoTokenizer
 
 from vllm import LLM, SamplingParams
 
+# Minimal OpenTelemetry imports for Google Cloud Trace
+from opentelemetry import trace
+from opentelemetry.exporter.cloud_trace import CloudTraceSpanExporter
+from opentelemetry.sdk.trace import TracerProvider
+from opentelemetry.sdk.trace.export import (
+    SimpleSpanProcessor,
+)
+
+
 load_dotenv()
+
+# Initialize Google Cloud Trace
+def setup_tracing():
+    # Get project ID for tracing
+    project_id = os.getenv("GOOGLE_CLOUD_PROJECT", "image-classification-terraform")
+    
+    # Set up the tracer provider
+    trace.set_tracer_provider(TracerProvider())
+    tracer = trace.get_tracer_provider()
+    
+    # Create Cloud Trace exporter
+    cloud_trace_exporter = CloudTraceSpanExporter(project_id=project_id)
+    
+    # Add the exporter to the tracer provider
+    tracer.add_span_processor(SimpleSpanProcessor(cloud_trace_exporter))
+    
+    print(f"Google Cloud Trace initialized for project: {project_id}")
+
+# Setup tracing before creating FastAPI app
+setup_tracing()
 
 MODEL_NAME = os.getenv("MODEL_NAME", "gpt-oss-20b")
 HOST = os.getenv("HOST", "0.0.0.0")
@@ -100,61 +130,88 @@ async def health():
 
 @app.post("/generate", response_model=GenerateResponse)
 async def generate(req: GenerateRequest):
-    try:
-        sampling = SamplingParams(
-            temperature=req.temperature,
-            max_tokens=req.max_tokens,
-            top_p=req.top_p,
-            top_k=req.top_k,
-            presence_penalty=req.presence_penalty,
-            frequency_penalty=req.frequency_penalty,
-            stop=req.stop,
-        )
-        model = await get_llm()
-        outputs = await asyncio.get_running_loop().run_in_executor(
-            None, lambda: model.generate(prompts=[req.prompt], sampling_params=sampling)
-        )
-        output = outputs[0]
-        text = output.outputs[0].text
-        num_tokens = len(output.outputs[0].token_ids)
-        return GenerateResponse(text=text, num_tokens=num_tokens)
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+    tracer = trace.get_tracer(__name__)
+    start_time = time.time()
+    
+    with tracer.start_as_current_span("generate") as span:
+        try:
+            sampling = SamplingParams(
+                temperature=req.temperature,
+                max_tokens=req.max_tokens,
+                top_p=req.top_p,
+                top_k=req.top_k,
+                presence_penalty=req.presence_penalty,
+                frequency_penalty=req.frequency_penalty,
+                stop=req.stop,
+            )
+            
+            model = await get_llm()
+            outputs = await asyncio.get_running_loop().run_in_executor(
+                None, lambda: model.generate(prompts=[req.prompt], sampling_params=sampling)
+            )
+            output = outputs[0]
+            text = output.outputs[0].text
+            num_tokens = len(output.outputs[0].token_ids)
+            
+            # Add basic metrics to span
+            duration = time.time() - start_time
+            span.set_attribute("duration_ms", int(duration * 1000))
+            span.set_attribute("num_tokens", num_tokens)
+            span.set_attribute("max_tokens", req.max_tokens)
+            
+            return GenerateResponse(text=text, num_tokens=num_tokens)
+        except Exception as e:
+            span.set_attribute("error", True)
+            raise HTTPException(status_code=500, detail=str(e))
 
 
 @app.post("/chat", response_model=ChatResponse)
 async def chat(req: ChatRequest):
-    try:
-        # Convert messages to the format expected by apply_chat_template
-        messages = [{"role": m.role, "content": m.content} for m in req.messages]
-        
-        # Use the model's built-in chat template
-        tokenizer = await get_tokenizer()
-        prompt = tokenizer.apply_chat_template(
-            messages, 
-            tokenize=False, 
-            add_generation_prompt=True
-        )
-        
-        sampling = SamplingParams(
-            temperature=req.temperature,
-            max_tokens=req.max_tokens,
-            top_p=req.top_p,
-            top_k=req.top_k,
-            presence_penalty=req.presence_penalty,
-            frequency_penalty=req.frequency_penalty,
-            stop=req.stop,
-        )
-        model = await get_llm()
-        outputs = await asyncio.get_running_loop().run_in_executor(
-            None, lambda: model.generate(prompts=[prompt], sampling_params=sampling)
-        )
-        output = outputs[0]
-        text = output.outputs[0].text
-        num_tokens = len(output.outputs[0].token_ids)
-        return ChatResponse(text=text, num_tokens=num_tokens)
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+    tracer = trace.get_tracer(__name__)
+    start_time = time.time()
+    
+    with tracer.start_as_current_span("chat") as span:
+        try:
+            # Convert messages to the format expected by apply_chat_template
+            messages = [{"role": m.role, "content": m.content} for m in req.messages]
+            
+            # Use the model's built-in chat template
+            tokenizer = await get_tokenizer()
+            prompt = tokenizer.apply_chat_template(
+                messages, 
+                tokenize=False, 
+                add_generation_prompt=True
+            )
+            
+            sampling = SamplingParams(
+                temperature=req.temperature,
+                max_tokens=req.max_tokens,
+                top_p=req.top_p,
+                top_k=req.top_k,
+                presence_penalty=req.presence_penalty,
+                frequency_penalty=req.frequency_penalty,
+                stop=req.stop,
+            )
+            
+            model = await get_llm()
+            outputs = await asyncio.get_running_loop().run_in_executor(
+                None, lambda: model.generate(prompts=[prompt], sampling_params=sampling)
+            )
+            output = outputs[0]
+            text = output.outputs[0].text
+            num_tokens = len(output.outputs[0].token_ids)
+            
+            # Add basic metrics to span
+            duration = time.time() - start_time
+            span.set_attribute("duration_ms", int(duration * 1000))
+            span.set_attribute("num_tokens", num_tokens)
+            span.set_attribute("max_tokens", req.max_tokens)
+            span.set_attribute("message_count", len(req.messages))
+            
+            return ChatResponse(text=text, num_tokens=num_tokens)
+        except Exception as e:
+            span.set_attribute("error", True)
+            raise HTTPException(status_code=500, detail=str(e))
 
 
 if __name__ == "__main__":

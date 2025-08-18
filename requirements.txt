@@ -5,3 +5,4 @@ transformers==4.45.2
 opentelemetry-api
 opentelemetry-sdk
 opentelemetry-exporter-gcp-trace
+google-cloud-storage

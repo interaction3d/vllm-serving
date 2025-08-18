@@ -2,11 +2,13 @@ import os
 import asyncio
 import time
 from typing import List, Optional
+from pathlib import Path
 
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field
 from transformers import AutoTokenizer
+from google.cloud import storage
 
 from vllm import LLM, SamplingParams
 
@@ -18,6 +20,8 @@ from opentelemetry.sdk.trace.export import (
     SimpleSpanProcessor,
 )
 
+
+os.environ["VLLM_TORCH_PROFILER_DIR"] = "./vllm_profile"
 
 load_dotenv()
 
@@ -37,6 +41,39 @@ def setup_tracing():
     tracer.add_span_processor(SimpleSpanProcessor(cloud_trace_exporter))
     
     print(f"Google Cloud Trace initialized for project: {project_id}")
+
+
+def upload_profile_to_gcs():
+    """Upload vLLM profiling data to Google Cloud Storage."""
+    try:
+        profile_dir = Path("./vllm_profile")
+        if not profile_dir.exists():
+            print("No profile directory found, skipping upload")
+            return
+        
+        # Initialize GCS client
+        client = storage.Client()
+        bucket_name = "torch-trace-output"
+        bucket = client.bucket(bucket_name)
+        
+        # Upload all files recursively
+        uploaded_count = 0
+        for file_path in profile_dir.rglob("*"):
+            if file_path.is_file():
+                # Create relative path for GCS object name
+                relative_path = file_path.relative_to(".")
+                blob_name = str(relative_path)
+                
+                # Upload file
+                blob = bucket.blob(blob_name)
+                blob.upload_from_filename(str(file_path))
+                uploaded_count += 1
+                print(f"Uploaded: {blob_name}")
+        
+        print(f"Successfully uploaded {uploaded_count} profile files to gs://{bucket_name}/")
+        
+    except Exception as e:
+        print(f"Warning: Failed to upload profile data to GCS: {e}")
 
 # Setup tracing before creating FastAPI app
 setup_tracing()
@@ -94,16 +131,47 @@ _llm: Optional[LLM] = None
 _tokenizer: Optional[AutoTokenizer] = None
 
 
+def instrument_llm_layers(llm: LLM):
+    """Instrument LLM model layers with OpenTelemetry spans for detailed tracing."""
+    tracer = trace.get_tracer(__name__)
+    
+    def otel_layer_hook(module, input, output):
+        """Hook function to create spans for each layer execution."""
+        layer_name = module.__class__.__name__
+        with tracer.start_as_current_span(f"layer.{layer_name}"):
+            pass  # The actual layer execution happens automatically
+    
+    try:
+        # Access the underlying PyTorch model
+        torch_model = llm.model
+        
+        # Register hooks for transformer layers
+        layer_count = 0
+        for name, module in torch_model.named_modules():
+            module.register_forward_hook(otel_layer_hook)
+            layer_count += 1
+        
+        print(f"Instrumented {layer_count} model layers with OpenTelemetry spans")
+        
+    except Exception as e:
+        print(f"Warning: Could not instrument model layers: {e}")
+
+
 async def get_llm() -> LLM:
     global _llm
     if _llm is None:
         def _init_llm() -> LLM:
-            return LLM(
+            llm = LLM(
                 model=MODEL_NAME,
                 tensor_parallel_size=TP_DEGREE,
                 trust_remote_code=TRUST_REMOTE_CODE,
                 max_model_len=MAX_MODEL_LEN,
             )
+            
+            # Instrument the model layers for detailed tracing
+            instrument_llm_layers(llm)
+            
+            return llm
 
         loop = asyncio.get_running_loop()
         _llm = await loop.run_in_executor(None, _init_llm)
@@ -135,20 +203,31 @@ async def generate(req: GenerateRequest):
     
     with tracer.start_as_current_span("generate") as span:
         try:
-            sampling = SamplingParams(
-                temperature=req.temperature,
-                max_tokens=req.max_tokens,
-                top_p=req.top_p,
-                top_k=req.top_k,
-                presence_penalty=req.presence_penalty,
-                frequency_penalty=req.frequency_penalty,
-                stop=req.stop,
-            )
+            with tracer.start_as_current_span("generate.sampling_params"):
+                sampling = SamplingParams(
+                    temperature=req.temperature,
+                    max_tokens=req.max_tokens,
+                    top_p=req.top_p,
+                    top_k=req.top_k,
+                    presence_penalty=req.presence_penalty,
+                    frequency_penalty=req.frequency_penalty,
+                    stop=req.stop,
+                )
+
+            with tracer.start_as_current_span("generate.get_model"):
+                model = await get_llm()
             
-            model = await get_llm()
-            outputs = await asyncio.get_running_loop().run_in_executor(
-                None, lambda: model.generate(prompts=[req.prompt], sampling_params=sampling)
-            )
+            model.start_profile()
+            with tracer.start_as_current_span("generate.outputs"):
+                # outputs = await asyncio.get_running_loop().run_in_executor(
+                #     None, lambda: model.generate(prompts=[req.prompt], sampling_params=sampling)
+                # )
+                outputs = model.generate(prompts=[req.prompt], sampling_params=sampling)
+            model.stop_profile()
+            
+            # Upload profile data to GCS
+            upload_profile_to_gcs()
+            
             output = outputs[0]
             text = output.outputs[0].text
             num_tokens = len(output.outputs[0].token_ids)
